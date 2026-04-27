@@ -1,0 +1,12 @@
+svnbrain_high = (description= (retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.us-phoenix-1.oraclecloud.com))(connect_data=(service_name=g4f360f66c9b59b_svnbrain_high.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))
+
+svnbrain_medium = (description= (retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.us-phoenix-1.oraclecloud.com))(connect_data=(service_name=g4f360f66c9b59b_svnbrain_medium.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))
+
+svnbrain_low = (description= (retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.us-phoenix-1.oraclecloud.com))(connect_data=(service_name=g4f360f66c9b59b_svnbrain_low.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))
+
+svnbrain_tp = (description= (retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.us-phoenix-1.oraclecloud.com))(connect_data=(service_name=g4f360f66c9b59b_svnbrain_tp.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))
+
+svnbrain_tpurgent = (description= (retry_count=20)(retry_delay=3)(address=(protocol=tcps)(port=1522)(host=adb.us-phoenix-1.oraclecloud.com))(connect_data=(service_name=g4f360f66c9b59b_svnbrain_tpurgent.adb.oraclecloud.com))(security=(ssl_server_dn_match=yes)))
+
+
+
