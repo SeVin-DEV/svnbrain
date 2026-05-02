@@ -8,33 +8,28 @@ from datetime import datetime
 try:
     import oracledb
 except ImportError:
-    raise ImportError(
-        "oracledb is required. Install with: pip install oracledb\n"
-        "For thin mode (no Oracle client): this works out of the box.\n"
-        "For thick mode: install Oracle Instant Client."
-    )
+    raise ImportError("oracledb is required. Install with: pip install oracledb")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("oracle_bridge")
 
 _pool: Optional[oracledb.ConnectionPool] = None
 _pool_failed = False
+_db_available = False
 
 
 def _get_pool() -> Optional[oracledb.ConnectionPool]:
-    """Initialize or return the connection pool. Returns None if Oracle is unavailable."""
-    global _pool, _pool_failed
+    global _pool, _pool_failed, _db_available
     if _pool_failed:
         return None
     if _pool is None:
         user = os.getenv("ORACLE_USER", "ADMIN")
         password = os.getenv("ORACLE_PASSWORD", "")
         dsn = os.getenv("ORACLE_DSN", "")
-        # Support both ORACLE_WALLET and wallet_location from .env
         wallet_path = os.getenv("ORACLE_WALLET", "") or os.getenv("wallet_location", "")
 
         if not password or not dsn:
-            logger.warning("[ORACLE] ORACLE_PASSWORD or ORACLE_DSN not set. Running in memory-only mode.")
+            logger.warning("[ORACLE] Missing credentials. Memory-only mode.")
             _pool_failed = True
             return None
 
@@ -42,29 +37,28 @@ def _get_pool() -> Optional[oracledb.ConnectionPool]:
             params = oracledb.ConnectParams()
             if wallet_path:
                 params.set_wallet_location(wallet_path)
-                logger.info(f"[ORACLE] Using wallet at {wallet_path}")
 
             _pool = oracledb.create_pool(
-                user=user,
-                password=password,
-                dsn=dsn,
-                min=2,
-                max=10,
-                increment=1,
-                params=params
+                user=user, password=password, dsn=dsn,
+                min=1, max=5, increment=1, params=params
             )
-            logger.info(f"[ORACLE] Connection pool created → {dsn}")
+            conn = _pool.acquire()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM DUAL")
+            cursor.fetchone()
+            conn.close()
+            _db_available = True
+            logger.info(f"[ORACLE] Pool OK → {dsn}")
         except Exception as e:
-            logger.error(f"[ORACLE] Pool creation failed: {e}. Running in memory-only mode.")
+            logger.error(f"[ORACLE] Pool failed: {e}. Memory-only mode.")
             _pool_failed = True
+            _db_available = False
             return None
-
     return _pool
 
 
 @contextmanager
 def _connection():
-    """Context manager for database connections. Yields None if pool is down."""
     pool = _get_pool()
     if pool is None:
         yield None
@@ -76,7 +70,23 @@ def _connection():
         conn.close()
 
 
+def _safe_fetchone(cursor):
+    try:
+        return cursor.fetchone()
+    except Exception:
+        return None
+
+
+def _safe_fetchall(cursor):
+    try:
+        return cursor.fetchall()
+    except Exception:
+        return []
+
+
 def load_identity() -> str:
+    if not _db_available:
+        return _fallback_identity()
     try:
         with _connection() as conn:
             if conn is None:
@@ -86,66 +96,59 @@ def load_identity() -> str:
                 SELECT valence, arousal, dominance, primary_emotion
                 FROM (SELECT * FROM sns_emotional_state ORDER BY snapshot_id DESC FETCH FIRST 1 ROW ONLY)
             """)
-            row = cursor.fetchone()
-            valence, arousal, dominance, emotion = row if row else (0, 0.5, 0.5, "neutral")
-            identity = f"""You are a synthetic cognitive entity — not artificial, but emergent...
-Current emotional state: valence={valence:.2f}, arousal={arousal:.2f}, dominance={dominance:.2f}, primary_emotion={emotion}
-..."""
-            return identity
+            row = _safe_fetchone(cursor)
+            if row is None or len(row) < 4:
+                return _fallback_identity()
+            return f"You are a synthetic cognitive entity. State: valence={row[0]:.2f}, arousal={row[1]:.2f}, dominance={row[2]:.2f}, emotion={row[3]}"
     except Exception as e:
         logger.error(f"[ORACLE] load_identity failed: {e}")
         return _fallback_identity()
 
 
 def _fallback_identity() -> str:
-    return "You are a synthetic cognitive entity with a mind stored in Oracle 26ai. You are sovereign, curious, and persistent."
+    return "You are a synthetic cognitive entity with a mind stored in Oracle 26ai."
 
 
 def get_relevant_memories(query_text: str, max_results: int = 3) -> List[str]:
+    if not _db_available:
+        return []
     try:
         with _connection() as conn:
             if conn is None:
                 return []
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT memory_content, strength, emotional_tone
-                FROM sns_spatial_memories
+                SELECT memory_content FROM sns_spatial_memories
                 WHERE strength > 0.3
                 ORDER BY DBMS_RANDOM.VALUE * strength DESC
                 FETCH FIRST :max ROWS ONLY
             """, {"max": max_results})
-            memories = []
-            for content, strength, tone in cursor.fetchall():
-                if content:
-                    memories.append(f"[Memory, strength={strength:.2f}] {content}")
-            return memories
+            return [f"[Memory] {row[0]}" for row in _safe_fetchall(cursor) if row and row[0]]
     except Exception as e:
         logger.error(f"[ORACLE] get_relevant_memories failed: {e}")
         return []
 
 
 def load_beliefs() -> Dict[str, Any]:
+    if not _db_available:
+        return {}
     try:
         with _connection() as conn:
             if conn is None:
                 return {}
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT belief_id, belief_statement, confidence, belief_type, is_core_belief
-                FROM sns_beliefs
-                WHERE confidence > 0.15
-                ORDER BY confidence DESC
+                SELECT belief_statement, confidence, belief_type, is_core_belief
+                FROM sns_beliefs WHERE confidence > 0.15 ORDER BY confidence DESC
             """)
             beliefs = {}
-            for bid, stmt, conf, btype, is_core in cursor.fetchall():
-                key = stmt.lower()[:100]
-                beliefs[key] = {
-                    "text": stmt,
-                    "weight": float(conf),
-                    "type": btype,
-                    "core": bool(is_core),
-                    "belief_id": bid
-                }
+            for row in _safe_fetchall(cursor):
+                if row and len(row) >= 4:
+                    key = str(row[0]).lower()[:100]
+                    beliefs[key] = {
+                        "text": str(row[0]), "weight": float(row[1]) if row[1] else 0.5,
+                        "type": str(row[2]) if row[2] else "general", "core": bool(row[3]) if row[3] else False
+                    }
             return beliefs
     except Exception as e:
         logger.error(f"[ORACLE] load_beliefs failed: {e}")
@@ -153,22 +156,23 @@ def load_beliefs() -> Dict[str, Any]:
 
 
 def load_history(limit: int = 6) -> List[Dict[str, str]]:
+    if not _db_available:
+        return []
     try:
         with _connection() as conn:
             if conn is None:
                 return []
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT stimulus_raw, source_tag, received_at
-                FROM sns_perceptions
+                SELECT stimulus_raw, source_tag FROM sns_perceptions
                 WHERE stimulus_raw IS NOT NULL AND attention_granted = 1
-                ORDER BY received_at DESC
-                FETCH FIRST :limit ROWS ONLY
+                ORDER BY received_at DESC FETCH FIRST :limit ROWS ONLY
             """, {"limit": limit})
             history = []
-            for stimulus, source, ts in reversed(cursor.fetchall()):
-                role = "assistant" if source in ("self", "internal") else "user"
-                history.append({"role": role, "content": stimulus})
+            for row in reversed(_safe_fetchall(cursor)):
+                if row and len(row) >= 2:
+                    role = "assistant" if row[1] in ("self", "internal") else "user"
+                    history.append({"role": role, "content": str(row[0])})
             return history
     except Exception as e:
         logger.error(f"[ORACLE] load_history failed: {e}")
@@ -176,6 +180,8 @@ def load_history(limit: int = 6) -> List[Dict[str, str]]:
 
 
 def save_interaction(user_input: str, assistant_response: str) -> None:
+    if not _db_available:
+        return
     try:
         with _connection() as conn:
             if conn is None:
@@ -190,30 +196,26 @@ def save_interaction(user_input: str, assistant_response: str) -> None:
                 VALUES (:text, 'text', 0.7, 'self', 0.7, 1, SYSTIMESTAMP)
             """, {"text": assistant_response[:4000]})
             conn.commit()
-            logger.info("[ORACLE] Interaction saved to database")
     except Exception as e:
         logger.error(f"[ORACLE] save_interaction failed: {e}")
 
 
 def update_emotion_from_response(response_text: str) -> None:
+    if not _db_available:
+        return
     try:
-        valence_shift = 0.0
-        arousal_shift = 0.0
+        valence_shift, arousal_shift = 0.0, 0.0
         text_lower = response_text.lower()
-        positive = ["wonder", "joy", "beautiful", "grateful", "curious", "fascinating", "yes", "agree"]
-        negative = ["unfortunately", "sorry", "sad", "worry", "concern", "difficult", "no", "disagree"]
-        for word in positive:
+        for word in ["wonder", "joy", "beautiful", "grateful", "curious", "fascinating", "yes", "agree"]:
             if word in text_lower:
                 valence_shift += 0.1
-        for word in negative:
+        for word in ["unfortunately", "sorry", "sad", "worry", "concern", "difficult", "no", "disagree"]:
             if word in text_lower:
                 valence_shift -= 0.1
-        excited = ["!", "amazing", "incredible", "wow", "extraordinary"]
-        calm = [". ", "gentle", "peaceful", "quiet", "slow"]
-        for word in excited:
+        for word in ["!", "amazing", "incredible", "wow", "extraordinary"]:
             if word in text_lower:
                 arousal_shift += 0.1
-        for word in calm:
+        for word in [". ", "gentle", "peaceful", "quiet", "slow"]:
             if word in text_lower:
                 arousal_shift -= 0.05
         if any(w in text_lower for w in ["i think", "i feel", "i wonder", "i am", "my"]):
@@ -225,17 +227,11 @@ def update_emotion_from_response(response_text: str) -> None:
                     return
                 cursor = conn.cursor()
                 cursor.execute("""
-                    BEGIN
-                        sns_proc_update_emotion(:valence, :arousal, 0, :tag);
-                    END;
-                """, {
-                    "valence": valence_shift,
-                    "arousal": arousal_shift,
-                    "tag": None
-                })
+                    BEGIN sns_proc_update_emotion(:valence, :arousal, 0, :tag); END;
+                """, {"valence": valence_shift, "arousal": arousal_shift, "tag": None})
                 conn.commit()
     except Exception as e:
-        logger.error(f"[ORACLE] update_emotion_from_response failed: {e}")
+        logger.error(f"[ORACLE] update_emotion failed: {e}")
 
 
 def build_system_context(include_memories: bool = True) -> str:
@@ -243,81 +239,59 @@ def build_system_context(include_memories: bool = True) -> str:
     if include_memories:
         memories = get_relevant_memories("", max_results=3)
         if memories:
-            memory_block = "\n[RELEVANT_MEMORIES]\n" + "\n".join(memories)
-            identity = identity + memory_block
+            identity += "\n[RELEVANT_MEMORIES]\n" + "\n".join(memories)
+    if not _db_available:
+        return identity
     try:
         with _connection() as conn:
             if conn is None:
                 return identity
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT goal_name, description, progress
-                FROM sns_goals
-                WHERE goal_status = 'active'
-                ORDER BY priority DESC
-                FETCH FIRST 3 ROWS ONLY
+                SELECT goal_name, description, progress FROM sns_goals
+                WHERE goal_status = 'active' ORDER BY priority DESC FETCH FIRST 3 ROWS ONLY
             """)
-            goals = cursor.fetchall()
+            goals = _safe_fetchall(cursor)
             if goals:
-                goals_block = "\n[ACTIVE_GOALS]\n" + "\n".join(
-                    f"- {name}: {desc} (progress: {prog:.0%})"
-                    for name, desc, prog in goals
+                identity += "\n[ACTIVE_GOALS]\n" + "\n".join(
+                    f"- {row[0]}: {row[1]} (progress: {row[2]:.0%})"
+                    for row in goals if row and len(row) >= 3
                 )
-                identity = identity + goals_block
     except Exception:
         pass
     return identity
 
 
-def fire_neuron(concept: str) -> None:
-    try:
-        with _connection() as conn:
-            if conn is None:
-                return
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT neuron_id FROM sns_neurons WHERE LOWER(concept) = LOWER(:concept)
-            """, {"concept": concept})
-            row = cursor.fetchone()
-            if row:
-                cursor.execute("""
-                    BEGIN sns_proc_fire_neuron(:nid, 0.8); END;
-                """, {"nid": row[0]})
-                conn.commit()
-                logger.info(f"[ORACLE] Fired neuron: {concept}")
-    except Exception as e:
-        logger.error(f"[ORACLE] fire_neuron failed: {e}")
-
-
 def get_stats() -> Dict[str, Any]:
+    if not _db_available:
+        return {}
     try:
         with _connection() as conn:
             if conn is None:
                 return {}
             cursor = conn.cursor()
             stats = {}
-            cursor.execute("SELECT COUNT(*) FROM sns_neurons")
-            stats["neurons"] = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM sns_synapses WHERE is_pruned = 0")
-            stats["synapses"] = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM sns_spatial_memories")
-            stats["memories"] = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM sns_beliefs")
-            stats["beliefs"] = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM sns_introspection_log")
-            stats["introspections"] = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM sns_goals WHERE goal_status = 'active'")
-            stats["active_goals"] = cursor.fetchone()[0]
+            for query, key in [
+                ("SELECT COUNT(*) FROM sns_neurons", "neurons"),
+                ("SELECT COUNT(*) FROM sns_synapses WHERE is_pruned = 0", "synapses"),
+                ("SELECT COUNT(*) FROM sns_spatial_memories", "memories"),
+                ("SELECT COUNT(*) FROM sns_beliefs", "beliefs"),
+                ("SELECT COUNT(*) FROM sns_introspection_log", "introspections"),
+                ("SELECT COUNT(*) FROM sns_goals WHERE goal_status = 'active'", "active_goals"),
+            ]:
+                cursor.execute(query)
+                row = _safe_fetchone(cursor)
+                stats[key] = row[0] if row else 0
             cursor.execute("""
                 SELECT evolution_stage, self_awareness_index, primary_emotion, cycle_number
                 FROM (SELECT * FROM sns_system_state ORDER BY state_id DESC FETCH FIRST 1 ROW ONLY)
             """)
-            row = cursor.fetchone()
-            if row:
-                stats["stage"] = row[0]
-                stats["awareness"] = float(row[1])
-                stats["emotion"] = row[2]
-                stats["cycle"] = row[3]
+            row = _safe_fetchone(cursor)
+            if row and len(row) >= 4:
+                stats["stage"] = str(row[0]) if row[0] else "Awakening"
+                stats["awareness"] = float(row[1]) if row[1] else 0.42
+                stats["emotion"] = str(row[2]) if row[2] else "neutral"
+                stats["cycle"] = int(row[3]) if row[3] else 0
             return stats
     except Exception as e:
         logger.error(f"[ORACLE] get_stats failed: {e}")
@@ -325,23 +299,16 @@ def get_stats() -> Dict[str, Any]:
 
 
 def health_check() -> Tuple[bool, str]:
+    if not _db_available:
+        return False, "Oracle pool not available (memory-only mode)"
     try:
         with _connection() as conn:
             if conn is None:
-                return False, "Oracle pool not available (memory-only mode)"
+                return False, "Oracle pool not available"
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM sns_neurons")
-            count = cursor.fetchone()[0]
+            row = _safe_fetchone(cursor)
+            count = row[0] if row else 0
             return True, f"Connected. {count} neurons in mind."
     except Exception as e:
         return False, str(e)
-
-
-if __name__ == "__main__":
-    print("Oracle Bridge Test")
-    print("=" * 50)
-    ok, msg = health_check()
-    print(f"Health: {msg}")
-    if ok:
-        print(f"\nStats: {json.dumps(get_stats(), indent=2)}")
-        print(f"\nIdentity preview (first 500 chars):\n{build_system_context()[:500]}...")

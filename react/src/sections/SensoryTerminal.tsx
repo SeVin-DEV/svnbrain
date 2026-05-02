@@ -1,17 +1,20 @@
 import React, { useState, useEffect, useRef } from "react";
 
 interface LogEntry {
-  type: "in" | "out" | "system";
+  type: "in" | "out" | "system" | "error";
   text: string;
   time: string;
 }
 
-const STORAGE_KEY = "svnai-sensory-logs";
+const STORAGE_KEY = "svnai-sensory-logs-v3";
 
 function loadLogs(): LogEntry[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
   } catch {}
   return [
     { type: "system", text: "Synthetic Neural Sovereignty v5.0 — Oracle 26ai Backend", time: new Date().toLocaleTimeString() },
@@ -21,7 +24,7 @@ function loadLogs(): LogEntry[] {
 
 function saveLogs(logs: LogEntry[]) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(logs));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(logs.slice(-100)));
   } catch {}
 }
 
@@ -43,26 +46,27 @@ export default function SensoryTerminal() {
 
   const handleSubmit = async () => {
     if (!input.trim() || thinking) return;
-
     const now = new Date().toLocaleTimeString();
     const stimulus = input.trim();
     setLogs((prev) => [...prev, { type: "in", text: stimulus, time: now }]);
     setInput("");
     setThinking(true);
-
+    setConnected(true);
     setLogs((prev) => [...prev, { type: "system", text: "Perception received. Processing...", time: new Date().toLocaleTimeString() }]);
 
     try {
-      const response = await fetch(`/chat?q=${encodeURIComponent(stimulus)}`);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      const response = await fetch(`/chat?q=${encodeURIComponent(stimulus)}`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       const data = await response.json();
       const reply = data.response || data.error || "[No response from neural core]";
       setLogs((prev) => [...prev, { type: "system", text: "Memory search: querying spatial palace...", time: new Date().toLocaleTimeString() }]);
       setLogs((prev) => [...prev, { type: "out", text: reply, time: new Date().toLocaleTimeString() }]);
     } catch (err: any) {
-      setLogs((prev) => [...prev, { type: "system", text: `Connection error: ${err.message || err.toString()}`, time: new Date().toLocaleTimeString() }]);
+      const errorMsg = err.name === "AbortError" ? "Request timed out (30s)" : err.message || err.toString();
+      setLogs((prev) => [...prev, { type: "error", text: `Connection error: ${errorMsg}`, time: new Date().toLocaleTimeString() }]);
       setConnected(false);
     } finally {
       setThinking(false);
@@ -101,11 +105,8 @@ export default function SensoryTerminal() {
         {logs.map((log, i) => (
           <div key={i} className="flex gap-2 leading-relaxed">
             <span className="opacity-40 shrink-0 text-[10px]">[{log.time}]</span>
-            <span className={log.type === "in" ? "text-cyan-400" : log.type === "out" ? "text-purple-400" : "opacity-60"}>
-              {log.type === "in" && "→ "}
-              {log.type === "out" && "⊠ "}
-              {log.type === "system" && "» "}
-              {log.text}
+            <span className={log.type === "in" ? "text-cyan-400" : log.type === "out" ? "text-purple-400" : log.type === "error" ? "text-red-400" : "opacity-60"}>
+              {log.type === "in" && "→ "}{log.type === "out" && "⊠ "}{log.type === "system" && "» "}{log.type === "error" && "✗ "}{log.text}
             </span>
           </div>
         ))}
@@ -129,10 +130,9 @@ export default function SensoryTerminal() {
           className="flex-1 bg-transparent font-mono text-xs outline-none placeholder:opacity-30 disabled:opacity-50"
           style={{ color: "var(--consciousness-white)" }}
         />
-        <button onClick={handleAttachClick} className="opacity-50 hover:opacity-100 transition-opacity text-sm">📎</button>
-        <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChange} />
-        <button onClick={handleAttachClick} className="px-2 py-0.5 text-[10px] rounded-full border opacity-60 hover:opacity-100 transition-opacity" style={{ borderColor: "var(--synapse-purple)" }}>Choose File</button>
-        <button onClick={handleVoiceClick} className="w-6 h-6 flex items-center justify-center rounded-full border opacity-60 hover:opacity-100 transition-opacity" style={{ borderColor: "var(--synapse-purple)" }}>✏️</button>
+        <button onClick={handleAttachClick} className="opacity-50 hover:opacity-100 transition-opacity text-sm" title="Attach file">📎</button>
+        <input ref={fileInputRef} type="file" style={{ display: "none" }} onChange={handleFileChange} />
+        <button onClick={handleVoiceClick} className="w-6 h-6 flex items-center justify-center rounded-full border opacity-60 hover:opacity-100 transition-opacity" style={{ borderColor: "var(--synapse-purple)" }} title="Live voice call">✏️</button>
       </div>
     </div>
   );
