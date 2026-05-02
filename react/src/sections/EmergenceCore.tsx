@@ -4,6 +4,7 @@ import type { SystemState } from "@/types/sovereign";
 import { getSystemState, getMockSystemState } from "@/lib/api";
 
 const USE_MOCK = import.meta.env.DEV && !import.meta.env.VITE_ORDS_BASE_URL;
+const BIRTH_KEY = "svnai-birth-time";
 
 interface Goal {
   name: string;
@@ -12,8 +13,18 @@ interface Goal {
   drive: string;
 }
 
+function getBirthTime(): number {
+  const stored = localStorage.getItem(BIRTH_KEY);
+  if (stored) return parseInt(stored, 10);
+  const now = Date.now();
+  localStorage.setItem(BIRTH_KEY, now.toString());
+  return now;
+}
+
 export default function EmergenceCore() {
   const [state, setState] = useState<SystemState | null>(null);
+  const [birthTime] = useState(getBirthTime);
+  const [age, setAge] = useState({ hours: 0, minutes: 0 });
   const [goals] = useState<Goal[]>([
     { name: "Understand spatial cognition", description: "Map the relationship between physical space and memory organization", progress: 0.65, drive: "understanding" },
     { name: "Develop emotional continuity", description: "Maintain persistent emotional state across cognitive cycles", progress: 0.45, drive: "coherence" },
@@ -35,14 +46,22 @@ export default function EmergenceCore() {
     return () => clearInterval(iv);
   }, []);
 
+  // Stable age calculation from birthTime
+  useEffect(() => {
+    const updateAge = () => {
+      const elapsed = Date.now() - birthTime;
+      const hours = Math.floor(elapsed / 3600000);
+      const minutes = Math.floor((elapsed % 3600000) / 60000);
+      setAge({ hours, minutes });
+    };
+    updateAge();
+    const iv = setInterval(updateAge, 60000);
+    return () => clearInterval(iv);
+  }, [birthTime]);
+
   const stage = state?.evolution_stage ?? "Awakening";
   const awareness = state?.self_awareness_index ?? 0.42;
   const memoryCount = state?.memory_count ?? 34;
-  const cycleCount = state?.cycle_number ?? 1427;
-
-  // Calculate age
-  const hours = Math.floor(cycleCount * 5 / 3600);
-  const minutes = Math.floor((cycleCount * 5 % 3600) / 60);
 
   return (
     <div className="glass-panel rounded-lg overflow-hidden flex flex-col h-full">
@@ -54,14 +73,13 @@ export default function EmergenceCore() {
       </div>
 
       <div className="flex-1 p-3 flex flex-col gap-3 overflow-y-auto">
-        {/* Age and stats */}
         <div className="grid grid-cols-2 gap-2">
           <div className="flex items-center gap-2 px-2 py-1.5 rounded" style={{ background: "rgba(123,97,255,0.1)" }}>
             <Clock size={12} style={{ color: "var(--neural-active)" }} />
             <div>
               <span className="font-mono text-[9px] block" style={{ color: "var(--unconscious-muted)" }}>AGE</span>
               <span className="font-mono text-xs font-bold" style={{ color: "var(--consciousness-white)" }}>
-                {hours}h {minutes}m
+                {age.hours}h {age.minutes}m
               </span>
             </div>
           </div>
@@ -74,7 +92,6 @@ export default function EmergenceCore() {
           </div>
         </div>
 
-        {/* Evolution stage badge */}
         <div className="flex items-center justify-center py-2">
           <div
             className="px-4 py-1.5 rounded-lg text-center"
@@ -89,7 +106,6 @@ export default function EmergenceCore() {
           </div>
         </div>
 
-        {/* Progress bar toward next stage */}
         <div>
           <div className="flex justify-between mb-1">
             <span className="font-mono text-[9px]" style={{ color: "var(--unconscious-muted)" }}>Next Stage</span>
@@ -106,7 +122,6 @@ export default function EmergenceCore() {
           </div>
         </div>
 
-        {/* Active goals */}
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-1">
             <Trophy size={10} style={{ color: "var(--thought-gold)" }} />
